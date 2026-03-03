@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/base44/:path*",
+      "destination": "https://api.base44.com/v1/apps/699a4a1aa327791ff23ed554/entities/:path*"
+    }
+  ]
+}
