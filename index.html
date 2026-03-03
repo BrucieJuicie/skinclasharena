@@ -73,20 +73,40 @@
             initGame();
         }
 
-        // ==========================================
-        // 2. DATABASE HELPER FUNCTIONS
+       // ==========================================
+        // 2. DATABASE HELPER FUNCTIONS (DEBUG MODE)
         // ==========================================
         async function fetchEntity(entityName, query = {}) {
-            const qs = new URLSearchParams(query).toString();
-            const res = await fetch(`${API_BASE}/${entityName}?${qs}`, { headers });
-            const data = await res.json();
-            return data.items || [];
+            try {
+                const qs = new URLSearchParams(query).toString();
+                const res = await fetch(`${API_BASE}/${entityName}?${qs}`, { headers });
+                
+                if (!res.ok) {
+                    const errText = await res.text();
+                    throw new Error(`API Error ${res.status}: ${errText}`);
+                }
+                
+                const data = await res.json();
+                console.log(`Fetched ${entityName}:`, data); // Log to console for us to read
+                return data.items || data || [];
+            } catch (error) {
+                document.getElementById('status-text').innerText = "NETWORK ERROR: " + error.message;
+                document.getElementById('status-text').style.color = "#ff4444";
+                document.getElementById('status-text').style.animation = "none";
+                console.error(error);
+                throw error; // Stop the game from loading a blank screen
+            }
         }
 
         async function updateEntity(entityName, id, payload) {
-            await fetch(`${API_BASE}/${entityName}/${id}`, {
-                method: 'PATCH', headers, body: JSON.stringify(payload)
-            });
+            try {
+                const res = await fetch(`${API_BASE}/${entityName}/${id}`, {
+                    method: 'PATCH', headers, body: JSON.stringify(payload)
+                });
+                if (!res.ok) throw new Error(`Update failed: ${res.status}`);
+            } catch (error) {
+                console.error("Update Entity Error:", error);
+            }
         }
 
         async function handleForfeit() {
@@ -673,3 +693,4 @@
     </script>
 </body>
 </html>
+
