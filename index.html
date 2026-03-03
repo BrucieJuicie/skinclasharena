@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Skin Clash Arena</title>
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Rajdhani:wght@500;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            margin: 0; padding: 0;
+            background: radial-gradient(circle at 50% 50%, #1a0a2e 0%, #05020a 100%);
+            color: #C8A951; font-family: 'Rajdhani', sans-serif;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            min-height: 100vh; overflow: hidden;
+        }
+        #arena-wrapper {
+            position: relative;
+            box-shadow: 0 0 50px rgba(200, 169, 81, 0.15), 0 0 20px rgba(0,0,0,1);
+            border: 2px solid rgba(200, 169, 81, 0.4);
+            border-radius: 12px; overflow: hidden;
+            background-color: #0a0614;
+        }
+        .top-bar {
+            position: absolute; top: 15px; left: 0; right: 0;
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 0 20px; z-index: 10; pointer-events: none;
+        }
+        #status-text { 
+            font-family: 'Cinzel', serif; font-weight: bold; font-size: 1.2rem; 
+            text-shadow: 0 2px 4px #000; animation: pulse 2s infinite; 
+        }
+        .btn-forfeit {
+            pointer-events: auto; background: rgba(123, 0, 0, 0.8);
+            border: 1px solid #ff4444; color: #ff4444; border-radius: 6px;
+            padding: 8px 16px; font-family: 'Cinzel', serif; font-size: 0.9rem; 
+            font-weight: bold; cursor: pointer; transition: all 0.2s ease;
+        }
+        .btn-forfeit:hover { background: #ff4444; color: #fff; box-shadow: 0 0 15px #ff4444; }
+        @keyframes pulse { 0% { opacity: 0.8; } 50% { opacity: 1; text-shadow: 0 0 10px #C8A951; } 100% { opacity: 0.8; } }
+    </style>
+</head>
+<body>
+
+    <div id="arena-wrapper">
+        <div class="top-bar">
+            <span id="status-text">Connecting to Arena...</span>
+            <button class="btn-forfeit" onclick="handleForfeit()">🏳️ FORFEIT</button>
+        </div>
+        <div id="game-container"></div>
+    </div>
+
+    <script>
+        // ==========================================
+        // 1. BASE44 CONFIGURATION
+        // ==========================================
+        const APP_ID = '699a4a1aa327791ff23ed554'; 
+        const API_KEY = 'YOUR_API_KEY_HERE'; // <-- PASTE YOUR BASE44 API KEY HERE!
+        const API_BASE = `https://api.base44.com/v1/apps/${APP_ID}/entities`;
+
+        const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_KEY}` };
+
+        // Read the URL parameters Base44 sends us
+        const urlParams = new URLSearchParams(window.location.search);
+        const matchId = urlParams.get('matchId');
+        const userId = urlParams.get('userId');
+
+        if (!matchId || !userId) {
+            document.getElementById('status-text').innerText = "Error: Invalid Match Data.";
+            document.getElementById('status-text').style.color = "#ff4444";
+            document.getElementById('status-text').style.animation = "none";
+        } else {
+            initGame();
+        }
+
+        // ==========================================
+        // 2. DATABASE HELPER FUNCTIONS
+        // ==========================================
+        async function fetchEntity(entityName, query = {}) {
+            const qs = new URLSearchParams(query).toString();
+            const res = await fetch(`${API_BASE}/${entityName}?${qs}`, { headers });
+            const data = await res.json();
+            return data.items || [];
+        }
+
+        async function updateEntity(entityName, id, payload) {
+            await fetch(`${API_BASE}/${entityName}/${id}`, {
+                method: 'PATCH', headers, body: JSON.stringify(payload)
+            });
+        }
+
+        async function handleForfeit() {
+            document.getElementById('status-text').innerText = 'Surrendering...';
+            try {
+                const matches = await fetchEntity('DuelMatch', { id: matchId });
+                const m = matches[0];
+                if (m && m.status === 'in_progress') {
+                    const isP1 = m.player1_id === userId;
+                    const winnerId = isP1 ? m.player2_id : m.player1_id;
+                    // Send "finished" to match schema requirements
+                    await updateEntity('DuelMatch', matchId, { status: 'finished', winner_id: winnerId, finished_at: new Date().toISOString() });
+                }
+            } catch (e) { console.error(e); }
+            window.location.href = "https://app.base44.com/"; 
+        }
+
+        // ==========================================
+        // 3. ENGINE INITIALIZATION
+        // ==========================================
+        async function initGame() {
+            const matches = await fetchEntity('DuelMatch', { id: matchId });
+            const match = matches[0];
+            if (!match) return;
+
+            const isP1 = match.player1_id === userId;
+            const rawMyTeam = isP1 ? match.player1_team : match.player2_team;
+            const rawEnemyTeam = isP1 ? match.player2_team : match.player1_team;
+
+            const ROLE_MODIFIERS = {
+                Tank: { Assassin: 0.85 }, Assassin: { Mage: 1.15 }, Mage: { Fighter: 1.15 },
+                Fighter: { Tank: 1.15 }, Marksman: { Tank: 1.10 }, Support: { heal: 1.10, shield: 1.10 }
+            };
+
+            // Bulletproof JSON Sanitizer
+            function safeParseJSON(val, fallback) {
+                if (val && typeof val === 'object') return val;
+                if (typeof val === 'string') {
+                    try {
+                        const cleanedVal = val.replace(/\\"/g, '"').replace(/^"|"$/g, '');
+                        return JSON.parse(cleanedVal);
+                    } catch (e) { return fallback; }
+                }
+                return fallback;
+            }
+
+            document.getElementById('status-text').innerText = 'Hydrating Cards...';
+            
+            const hydrateTeam = async (team) => {
+                const hydrated = [];
+                for (const card of team) {
+                    let stats = { hp: 400, ad: 50, armor: 30, speed: 50, role: 'Fighter' };
+                    let abilities = {
+                        ability1_name: 'Strike', ability1_effect: '{"type":"damage","value":30}', ability1_desc: 'Deals 30 damage.',
+                        ability2_name: 'Defend', ability2_effect: '{"type":"dmg_reduction","value":0.4,"duration":2}', ability2_desc: 'Reduces damage.',
+                        ultimate_name: 'Finisher', ultimate_effect: '{"type":"damage","value":75}', ultimate_desc: 'Massive damage.'
+                    };
+                    
+                    const champs = await fetchEntity('Champion', { id: card.champion_id });
+                    if (champs && champs.length > 0) {
+                        const champ = champs[0];
+                        stats = { hp: champ.hp, ad: champ.ad, armor: champ.armor, speed: champ.speed, role: champ.role };
+                        abilities = {
+                            ability1_name: champ.ability1_name, ability1_effect: champ.ability1_effect, ability1_desc: champ.ability1_desc,
+                            ability2_name: champ.ability2_name, ability2_effect: champ.ability2_effect, ability2_desc: champ.ability2_desc,
+                            ultimate_name: champ.ultimate_name, ultimate_effect: champ.ultimate_effect, ultimate_desc: champ.ultimate_desc
+                        };
+                    }
+                    
+                    hydrated.push({
+                        ...card,
+                        name: card.skin_name || 'Unknown',
+                        maxHp: parseInt(stats.hp) || 400, hp: parseInt(stats.hp) || 400,
+                        ad: parseInt(stats.ad) || 50, armor: parseInt(stats.armor) || 30, speed: parseInt(stats.speed) || 50,
+                        role: stats.role || 'Fighter',
+                        a1: { name: abilities.ability1_name, effect: safeParseJSON(abilities.ability1_effect, { type: 'damage', value: 30 }), desc: abilities.ability1_desc },
+                        a2: { name: abilities.ability2_name, effect: safeParseJSON(abilities.ability2_effect, { type: 'damage', value: 20 }), desc: abilities.ability2_desc },
+                        ult: { name: abilities.ultimate_name, effect: safeParseJSON(abilities.ultimate_effect, { type: 'damage', value: 70 }), desc: abilities.ultimate_desc },
+                        statuses: []
+                    });
+                }
+                return hydrated;
+            };
+
+            const myPrepared = await hydrateTeam(rawMyTeam);
+            const enemyPrepared = await hydrateTeam(rawEnemyTeam);
+            document.getElementById('status-text').innerText = 'BATTLE ACTIVE';
+            document.getElementById('status-text').style.color = "#00ff88";
+            document.getElementById('status-text').style.animation = "none";
+
+            // ==========================================
+            // 4. PHASER BATTLE ENGINE
+            // ==========================================
+            class BattleScene extends Phaser.Scene {
+                constructor() { super('BattleScene'); }
+
+                create() {
+                    this.myTeam = myPrepared; this.enemyTeam = enemyPrepared;
+                    this.myIdx = 0; this.enemyIdx = 0; this.turn = 1;
+                    this.ultUsed = false; this.waitingForOpponent = false; this.gameOver = false;
+                    this.myLastMove = null; 
+
+                    this.W = 480; this.H = 800;
+                    this.graphics = this.add.graphics();
+                    
+                    // Cinematic Center Divider
+                    this.graphics.lineStyle(2, 0xC8A951, 0.3);
+                    this.graphics.lineBetween(20, 390, this.W - 20, 390);
+
+                    // Text Displays
+                    this.logText = this.add.text(20, 560, 'Battle Start!', { fontSize: '15px', fill: '#C8A951', fontFamily: 'Rajdhani', wordWrap: { width: 440 } });
+
+                    this.pSprite = null; this.eSprite = null;
+
+                    let imagesToLoad = false;
+                    [...this.myTeam, ...this.enemyTeam].forEach(c => {
+                        if (c.splash_url && c.champion_id) {
+                            this.load.image(c.champion_id, c.splash_url);
+                            imagesToLoad = true;
+                        }
+                    });
+
+                    if (imagesToLoad) {
+                        this.load.once('complete', () => this.buildControls());
+                        this.load.start();
+                    } else {
+                        this.buildControls();
+                    }
+                }
+
+                buildControls() {
+                    const btnW2 = 210;
+                    const btnY = this.H - 75;
+
+                    // Cinematic Attack Button
+                    const atkBg = this.add.graphics();
+                    atkBg.fillStyle(0x550000, 1);
+                    atkBg.lineStyle(2, 0xff4444, 0.8);
+                    atkBg.fillRoundedRect(20, btnY, btnW2, 55, 6);
+                    atkBg.strokeRoundedRect(20, btnY, btnW2, 55, 6);
+                    const atkTxt = this.add.text(20 + btnW2/2, btnY + 27, '⚔️ ATTACK', { fill: '#fff', fontSize: '20px', fontFamily: 'Cinzel', fontStyle: 'bold' }).setOrigin(0.5);
+                    this.atBtn = this.add.zone(20, btnY, btnW2, 55).setOrigin(0).setInteractive({ useHandCursor: true });
+                    this.atBtn.on('pointerdown', () => this.showAtk());
+                    this.atBtn.on('pointerover', () => atkBg.setAlpha(0.7));
+                    this.atBtn.on('pointerout', () => atkBg.setAlpha(1));
+                    this.atBtnVis = [atkBg, atkTxt, this.atBtn];
+
+                    // Cinematic Switch Button
+                    const swBg = this.add.graphics();
+                    swBg.fillStyle(0x002244, 1);
+                    swBg.lineStyle(2, 0x44aaff, 0.8);
+                    swBg.fillRoundedRect(40 + btnW2, btnY, btnW2, 55, 6);
+                    swBg.strokeRoundedRect(40 + btnW2, btnY, btnW2, 55, 6);
+                    const swTxt = this.add.text(40 + btnW2 + btnW2/2, btnY + 27, '🔄 SWITCH', { fill: '#fff', fontSize: '20px', fontFamily: 'Cinzel', fontStyle: 'bold' }).setOrigin(0.5);
+                    this.swBtn = this.add.zone(40 + btnW2, btnY, btnW2, 55).setOrigin(0).setInteractive({ useHandCursor: true });
+                    this.swBtn.on('pointerdown', () => this.showSw(false));
+                    this.swBtn.on('pointerover', () => swBg.setAlpha(0.7));
+                    this.swBtn.on('pointerout', () => swBg.setAlpha(1));
+                    this.swBtnVis = [swBg, swTxt, this.swBtn];
+
+                    this.menu = this.add.container(0, 0);
+                    this.updateUI();
+
+                    // Standalone HTTP Polling (The Unblinking Eye)
+                    const checkState = async () => {
+                        if (this.gameOver) return;
+                        try {
+                            const latestMatches = await fetchEntity('DuelMatch', { id: matchId });
+                            const m = latestMatches[0];
+                            if (!m) return;
+
+                            if (m.status === 'finished') {
+                                // If the opponent forfeited or won, end match.
+                                const didIWin = m.winner_id === userId;
+                                this.endMatch(didIWin, m.winner_id !== null && !m.battle_state?.p1_move);
+                                return;
+                            }
+
+                            let bs = m.battle_state || {};
+                            if (typeof bs === 'string') { try { bs = JSON.parse(bs); } catch(e) { bs = {}; } }
+
+                            const turnActions = bs.actions ? bs.actions[this.turn] : null;
+
+                            // Collision Auto-Heal
+                            if (this.waitingForOpponent && this.myLastMove && bs.turn === this.turn) {
+                                const amIMissing = isP1 ? !bs.p1_move : !bs.p2_move;
+                                if (amIMissing) this.pushMove();
+                            }
+
+                            // Advance Turn
+                            if (bs.turn === this.turn && bs.p1_move && bs.p2_move && this.waitingForOpponent) {
+                                this.resolve(bs.p1_move, bs.p2_move);
+                            }
+                        } catch (e) { console.error("Sync error:", e); }
+                    };
+
+                    // Check every 2 seconds
+                    this.syncInterval = setInterval(() => {
+                        if (this.waitingForOpponent && !this.gameOver) checkState();
+                    }, 2000);
+
+                    // Instantly sync when returning to inactive tab
+                    document.addEventListener("visibilitychange", () => {
+                        if (!document.hidden && this.waitingForOpponent) checkState();
+                    });
+                }
+
+                drawCardUI(x, y, champ, isEnemy) {
+                    // Card Border & Background
+                    this.graphics.fillStyle(0x111111, 0.95);
+                    this.graphics.lineStyle(2, isEnemy ? 0xff4444 : 0x00ff88, 0.6);
+                    this.graphics.fillRect(x, y, 120, 160);
+                    this.graphics.strokeRect(x, y, 120, 160);
+                    
+                    // Role Tag
+                    this.graphics.fillStyle(0x000000, 0.8);
+                    this.graphics.fillRect(x, y + 140, 120, 20);
+                    this.add.text(x + 60, y + 150, champ.role.toUpperCase(), { fill: '#C8A951', fontSize: '10px', fontFamily: 'Cinzel', fontStyle: 'bold' }).setOrigin(0.5);
+
+                    // Health Bar Frame
+                    const barY = isEnemy ? y + 175 : y - 20;
+                    this.graphics.lineStyle(1, 0x555555, 1);
+                    this.graphics.strokeRect(20, barY, 440, 12);
+                    
+                    // Health Fill
+                    this.graphics.fillStyle(0x222222, 1);
+                    this.graphics.fillRect(20, barY, 440, 12);
+                    const pct = Math.max(0, champ.hp / champ.maxHp);
+                    const col = pct > 0.5 ? 0x00cc44 : pct > 0.25 ? 0xffcc00 : 0xff3300;
+                    this.graphics.fillStyle(col, 1);
+                    this.graphics.fillRect(20, barY, 440 * pct, 12);
+                }
+
+                updateUI() {
+                    if (this.gameOver) return;
+                    this.graphics.clear();
+                    
+                    // Redraw Center Line
+                    this.graphics.lineStyle(2, 0xC8A951, 0.3);
+                    this.graphics.lineBetween(20, 390, this.W - 20, 390);
+
+                    const p = this.myTeam[this.myIdx]; 
+                    const e = this.enemyTeam[this.enemyIdx];
+                    
+                    // Player Info (Bottom Half)
+                    this.drawCardUI(this.W - 150, 420, p, false);
+                    
+                    // Clear old text if switching
+                    if(this.pInfoText) this.pInfoText.destroy();
+                    if(this.eInfoText) this.eInfoText.destroy();
+
+                    this.pInfoText = this.add.text(20, 420, `${p.name}\n\nAD: ${p.ad}\nArmor: ${p.armor}\nSpeed: ${p.speed}\n\nHP: ${Math.max(0, p.hp)} / ${p.maxHp}`, { fill: '#4ade80', fontSize: '16px', fontFamily: 'Rajdhani' });
+                    
+                    // Enemy Info (Top Half)
+                    this.drawCardUI(this.W - 150, 45, e, true);
+                    this.eInfoText = this.add.text(20, 45, `${e.name}\n\nAD: ${e.ad}\nArmor: ${e.armor}\nSpeed: ${e.speed}\n\nHP: ${Math.max(0, e.hp)} / ${e.maxHp}`, { fill: '#fca5a5', fontSize: '16px', fontFamily: 'Rajdhani' });
+
+                    // Sprites inside Card Frames
+                    if (this.pSprite) this.pSprite.destroy();
+                    if (p.champion_id && this.textures.exists(p.champion_id)) {
+                        this.pSprite = this.add.image(this.W - 90, 490, p.champion_id).setDisplaySize(110, 110);
+                    }
+                    
+                    if (this.eSprite) this.eSprite.destroy();
+                    if (e.champion_id && this.textures.exists(e.champion_id)) {
+                        this.eSprite = this.add.image(this.W - 90, 115, e.champion_id).setDisplaySize(110, 110);
+                    }
+
+                    // Bench Indicators
+                    const dotW = Math.min(30, Math.floor(440 / this.myTeam.length) - 4);
+                    this.myTeam.forEach((c, i) => {
+                        const x = 20 + i * (dotW + 4);
+                        this.graphics.fillStyle(c.hp > 0 ? 0x00ff88 : 0x444444, c.hp > 0 ? 0.8 : 0.4);
+                        this.graphics.fillRect(x, 400, dotW, 4);
+                    });
+                }
+
+                setButtonsVisible(visible) {
+                    this.atBtnVis.forEach(e => e.setVisible(visible));
+                    this.swBtnVis.forEach(e => e.setVisible(visible));
+                }
+
+                showAtk() {
+                    if (this.waitingForOpponent) return;
+                    this.menu.removeAll(true);
+                    const p = this.myTeam[this.myIdx];
+                    
+                    const moves = [
+                        { name: `Basic Strike`, effect: { type: 'damage', value: Math.round(p.ad * 0.8) }, desc: `Deal ${Math.round(p.ad * 0.8)} basic physical damage.` },
+                        { name: p.a1.name, effect: p.a1.effect, desc: p.a1.desc || 'No description available.' },
+                        { name: p.a2.name, effect: p.a2.effect, desc: p.a2.desc || 'No description available.' },
+                    ];
+                    if (!this.ultUsed) moves.push({ name: `⭐ ${p.ult.name}`, effect: p.ult.effect, desc: p.ult.desc || 'Ultimate ability.' });
+
+                    const menuBg = this.add.graphics();
+                    menuBg.fillStyle(0x0a0614, 0.98);
+                    menuBg.lineStyle(2, 0xC8A951, 0.5);
+                    menuBg.fillRect(10, 80, 460, 480);
+                    menuBg.strokeRect(10, 80, 460, 480);
+                    this.menu.add(menuBg);
+
+                    this.menu.add(this.add.text(25, 95, 'SELECT ATTACK', { fill: '#C8A951', fontSize: '18px', fontFamily: 'Cinzel', fontStyle: 'bold', letterSpacing: 2 }));
+
+                    moves.forEach((m, i) => {
+                        const btnH = 85; const btnY = 130 + i * (btnH + 12);
+                        const btnBg = this.add.graphics();
+                        btnBg.fillStyle(0x220000, 0.9);
+                        btnBg.lineStyle(1, 0x550000, 1);
+                        btnBg.fillRoundedRect(20, btnY, 440, btnH, 6);
+                        btnBg.strokeRoundedRect(20, btnY, 440, btnH, 6);
+                        this.menu.add(btnBg);
+
+                        const title = this.add.text(35, btnY + 12, m.name, { fill: '#ffffff', fontSize: '18px', fontStyle: 'bold', fontFamily: 'Cinzel' });
+                        const desc = this.add.text(35, btnY + 38, m.desc, { fill: '#fca5a5', fontSize: '14px', fontFamily: 'Rajdhani', wordWrap: { width: 410 } });
+
+                        const hitZone = this.add.zone(20, btnY, 440, btnH).setOrigin(0).setInteractive({ useHandCursor: true });
+                        hitZone.on('pointerover', () => btnBg.setAlpha(0.7));
+                        hitZone.on('pointerout', () => btnBg.setAlpha(1));
+                        hitZone.on('pointerdown', () => {
+                            if (m.effect === p.ult.effect) this.ultUsed = true;
+                            this.lockMove({ type: 'atk', effect: m.effect });
+                        });
+
+                        this.menu.add(title); this.menu.add(desc); this.menu.add(hitZone);
+                    });
+                }
+
+                showSw(forced) {
+                    this.menu.removeAll(true);
+                    const menuBg = this.add.graphics();
+                    menuBg.fillStyle(0x0a0614, 0.98);
+                    menuBg.lineStyle(2, 0xC8A951, 0.5);
+                    menuBg.fillRect(10, 80, 460, 480);
+                    menuBg.strokeRect(10, 80, 460, 480);
+                    this.menu.add(menuBg);
+
+                    this.menu.add(this.add.text(25, 95, forced ? '⚠️ CHAMPION DEFEATED - SWITCH' : 'SELECT NEXT CHAMPION', { fill: forced ? '#ff4444' : '#C8A951', fontSize: '18px', fontFamily: 'Cinzel', fontStyle: 'bold' }));
+
+                    let row = 0;
+                    this.myTeam.forEach((c, i) => {
+                        if (i !== this.myIdx && c.hp > 0) {
+                            const btnH = 60; const btnY = 130 + row * (btnH + 10);
+                            const btnBg = this.add.graphics();
+                            btnBg.fillStyle(0x001122, 0.9);
+                            btnBg.lineStyle(1, 0x003366, 1);
+                            btnBg.fillRoundedRect(20, btnY, 440, btnH, 6);
+                            btnBg.strokeRoundedRect(20, btnY, 440, btnH, 6);
+                            this.menu.add(btnBg);
+
+                            const bTxt = this.add.text(35, btnY + 20, `${c.name}   [ ${c.hp} / ${c.maxHp} HP ]`, { fill: '#93c5fd', fontSize: '18px', fontFamily: 'Rajdhani', fontStyle: 'bold' });
+                            
+                            const hitZone = this.add.zone(20, btnY, 440, btnH).setOrigin(0).setInteractive({ useHandCursor: true });
+                            hitZone.on('pointerover', () => btnBg.setAlpha(0.7));
+                            hitZone.on('pointerout', () => btnBg.setAlpha(1));
+                            hitZone.on('pointerdown', () => {
+                                this.lockMove({ type: 'sw', idx: i });
+                            });
+
+                            this.menu.add(bTxt); this.menu.add(hitZone);
+                            row++;
+                        }
+                    });
+                }
+
+                async lockMove(movePayload) {
+                    this.menu.removeAll(true);
+                    this.setButtonsVisible(false);
+                    this.waitingForOpponent = true;
+                    this.myLastMove = movePayload; 
+                    
+                    this.logText.setText('⏳ Waiting for opponent...');
+                    
+                    if (!isP1) await new Promise(res => setTimeout(res, 500)); // Write Offset
+                    this.pushMove();
+                }
+
+                async pushMove() {
+                    try {
+                        const matches = await fetchEntity('DuelMatch', { id: matchId });
+                        const m = matches[0];
+                        let bs = m.battle_state || {};
+                        if (typeof bs === 'string') { try { bs = JSON.parse(bs); } catch(e) { bs = {}; } }
+                        
+                        if (bs.turn !== this.turn) {
+                            bs.turn = this.turn; bs.p1_move = null; bs.p2_move = null;
+                        }
+
+                        if (isP1) bs.p1_move = this.myLastMove;
+                        else bs.p2_move = this.myLastMove;
+                        
+                        await updateEntity('DuelMatch', matchId, { battle_state: bs });
+                    } catch (e) { console.error(e); }
+                }
+
+                spawnFloatingText(x, y, text, color) {
+                    const fText = this.add.text(x, y, text, { fontSize: '32px', fill: color, fontStyle: 'bold', fontFamily: 'Cinzel', stroke: '#000000', strokeThickness: 6 }).setOrigin(0.5);
+                    this.tweens.add({ targets: fText, y: y - 80, alpha: 0, duration: 1800, ease: 'Power2', onComplete: () => fText.destroy() });
+                }
+
+                playHitAnim(sprite) {
+                    if (!sprite) return;
+                    sprite.setTint(0xff0000);
+                    this.tweens.add({ targets: sprite, x: sprite.x + 12, yoyo: true, duration: 50, repeat: 3, onComplete: () => sprite.clearTint() });
+                }
+
+                applyEffect(effect, attacker, target) {
+                    let log = "";
+                    if (!effect) return log;
+                    if (effect.type === 'combo') { (effect.effects || []).forEach(e => { log += this.applyEffect(e, attacker, target); }); return log; }
+                    
+                    const roleMod = ROLE_MODIFIERS[attacker.role]?.[target.role] || 1.0;
+                    const tSprite = target === this.myTeam[this.myIdx] ? this.pSprite : this.eSprite;
+                    const aSprite = attacker === this.myTeam[this.myIdx] ? this.pSprite : this.eSprite;
+
+                    if (effect.type === 'damage' || effect.type === 'true_damage') {
+                        const evade = target.statuses.find(s => s.type === 'evasion');
+                        if (evade) {
+                            log += `💨 DODGED!\n`;
+                            target.statuses = target.statuses.filter(s => s !== evade);
+                            this.spawnFloatingText(tSprite ? tSprite.x : 240, tSprite ? tSprite.y : 350, `MISS`, '#ffffff');
+                            return log;
+                        }
+
+                        let dmg = effect.value || attacker.ad;
+                        if (effect.type !== 'true_damage') dmg *= (1 - Math.min(0.5, target.armor / 200));
+                        dmg *= roleMod;
+                        const dr = target.statuses.find(s => s.type === 'dmg_reduction');
+                        if (dr) { dmg *= (1 - (dr.value || 0)); target.statuses = target.statuses.filter(s => s !== dr); }
+                        const shield = target.statuses.find(s => s.type === 'shield');
+                        if (shield) { const abs = Math.min(dmg, shield.value); dmg -= abs; shield.value -= abs; if (shield.value <= 0) target.statuses = target.statuses.filter(s => s !== shield); }
+                        
+                        dmg = Math.round(dmg); target.hp -= dmg;
+                        log += `💥 ${dmg} dmg to ${target.name}!\n`;
+                        
+                        this.playHitAnim(tSprite);
+                        this.spawnFloatingText(tSprite ? tSprite.x : 240, tSprite ? tSprite.y : 350, `-${dmg}`, '#ff4444');
+                        if (dmg >= 80) this.cameras.main.shake(250, 0.02);
+
+                    } else if (effect.type === 'heal') {
+                        const amt = Math.round(effect.value * (ROLE_MODIFIERS.Support?.heal || 1));
+                        attacker.hp = Math.min(attacker.maxHp, attacker.hp + amt);
+                        log += `💚 Healed ${amt} HP!\n`;
+                        this.spawnFloatingText(aSprite ? aSprite.x : 240, aSprite ? aSprite.y : 350, `+${amt}`, '#4ade80');
+                    } else if (effect.type === 'shield') {
+                        const amt = Math.round(effect.value * (ROLE_MODIFIERS.Support?.shield || 1));
+                        attacker.statuses.push({ type: 'shield', value: amt, duration: Infinity });
+                        log += `🛡️ Gained ${amt} shield!\n`;
+                        this.spawnFloatingText(aSprite ? aSprite.x : 240, aSprite ? aSprite.y : 350, `SHIELD`, '#93c5fd');
+                    } else if (effect.type === 'stun') {
+                        target.statuses.push({ type: 'stun', duration: 1 });
+                        log += `⚡ ${target.name} is STUNNED!\n`;
+                        this.spawnFloatingText(tSprite ? tSprite.x : 240, tSprite ? tSprite.y : 350, `STUN`, '#ffff00');
+                    } else if (effect.type === 'burn') {
+                        target.statuses.push({ type: 'burn', duration: 2 });
+                        log += `🔥 ${target.name} is BURNING!\n`;
+                        this.spawnFloatingText(tSprite ? tSprite.x : 240, tSprite ? tSprite.y : 350, `BURN`, '#ff8800');
+                    } else if (effect.type === 'slow') {
+                        target.statuses.push({ type: 'slow', value: effect.value || 20, duration: 2 });
+                        log += `🧊 ${target.name} SLOWED!\n`;
+                    } else if (effect.type === 'speed_boost') {
+                        attacker.statuses.push({ type: 'speed_boost', value: effect.value || 30, duration: 2 });
+                        log += `💨 Speed boosted!\n`;
+                    } else if (effect.type === 'dmg_reduction') {
+                        attacker.statuses.push({ type: 'dmg_reduction', value: effect.value || 0.35, duration: 2 });
+                        log += `🛡️ Braced for impact!\n`;
+                    } else if (effect.type === 'evasion') {
+                        attacker.statuses.push({ type: 'evasion', duration: 2 });
+                        log += `💨 Evading next attack!\n`;
+                        this.spawnFloatingText(aSprite ? aSprite.x : 240, aSprite ? aSprite.y : 350, `EVADE`, '#ffffff');
+                    } else if (effect.type === 'stat_debuff') {
+                        target.armor = Math.max(0, target.armor - (effect.value || 10));
+                        log += `📉 Armor reduced!\n`;
+                    }
+                    return log;
+                }
+
+                tickStatuses(champ) {
+                    let log = "";
+                    const tSprite = champ === this.myTeam[this.myIdx] ? this.pSprite : this.eSprite;
+                    champ.statuses = champ.statuses.filter(s => {
+                        if (s.type === 'burn') {
+                            const dmg = Math.round(champ.maxHp * 0.05); champ.hp -= dmg;
+                            log += `🔥 ${champ.name} took ${dmg} burn dmg!\n`;
+                            this.playHitAnim(tSprite);
+                            this.spawnFloatingText(tSprite ? tSprite.x : 240, tSprite ? tSprite.y : 350, `-${dmg}`, '#ff8800');
+                        }
+                        if (s.duration !== Infinity) s.duration--;
+                        return s.duration === Infinity || s.duration > 0;
+                    });
+                    return log;
+                }
+
+                async resolve(m1, m2) {
+                    this.waitingForOpponent = false; this.myLastMove = null; 
+                    const p1Move = isP1 ? m1 : m2; const p2Move = isP1 ? m2 : m1;
+                    const myMove = p1Move; const enMove = p2Move;
+                    let report = `--- Turn ${this.turn} ---\n`;
+
+                    if (myMove.type === 'sw') { this.myIdx = myMove.idx; report += `🔄 You switched to ${this.myTeam[this.myIdx].name}!\n`; }
+                    if (enMove.type === 'sw') { this.enemyIdx = enMove.idx; report += `🔄 Opponent switched to ${this.enemyTeam[this.enemyIdx].name}!\n`; }
+
+                    const myActive = this.myTeam[this.myIdx]; const enActive = this.enemyTeam[this.enemyIdx];
+                    
+                    const mySpd = myActive.speed - (myActive.statuses.find(s => s.type === 'slow')?.value || 0) + (myActive.statuses.find(s => s.type === 'speed_boost')?.value || 0);
+                    const enSpd = enActive.speed - (enActive.statuses.find(s => s.type === 'slow')?.value || 0) + (enActive.statuses.find(s => s.type === 'speed_boost')?.value || 0);
+
+                    const myAction = { c: myActive, m: myMove, t: enActive };
+                    const enAction = { c: enActive, m: enMove, t: myActive };
+                    const first = mySpd >= enSpd ? myAction : enAction;
+                    const second = mySpd >= enSpd ? enAction : myAction;
+
+                    const executeMove = (actor) => {
+                        if (actor.m.type === 'sw' || actor.c.hp <= 0) return;
+                        const stun = actor.c.statuses.find(s => s.type === 'stun');
+                        if (stun) { report += `⭐ ${actor.c.name} is STUNNED!\n`; actor.c.statuses = actor.c.statuses.filter(s => s !== stun); return; }
+                        report += this.applyEffect(actor.m.effect, actor.c, actor.t);
+                    };
+
+                    executeMove(first); if (second.c.hp > 0) executeMove(second);
+                    report += this.tickStatuses(myActive); report += this.tickStatuses(enActive);
+
+                    this.logText.setText(report); this.updateUI(); this.turn++;
+
+                    if (isP1) { await updateEntity('DuelMatch', matchId, { battle_state: { turn: this.turn, p1_move: null, p2_move: null } }); }
+
+                    if (this.checkWin()) return;
+
+                    setTimeout(() => {
+                        if (this.myTeam[this.myIdx].hp <= 0) {
+                            const hasAlive = this.myTeam.some((c, i) => i !== this.myIdx && c.hp > 0);
+                            if (hasAlive) this.showSw(true);
+                            else this.endMatch(false, false);
+                        } else {
+                            this.setButtonsVisible(true);
+                        }
+                    }, 2000);
+                }
+
+                checkWin() {
+                    const myAlive = this.myTeam.filter(c => c.hp > 0).length;
+                    const enAlive = this.enemyTeam.filter(c => c.hp > 0).length;
+                    if (myAlive === 0 || enAlive === 0) { this.endMatch(enAlive === 0, false); return true; }
+                    return false;
+                }
+
+                async endMatch(won, isForfeit) {
+                    this.gameOver = true; clearInterval(this.syncInterval);
+                    this.setButtonsVisible(false); this.menu.removeAll(true);
+                    
+                    const resultText = won ? '🏆 VICTORY!' : '💀 DEFEAT';
+                    this.add.text(240, 300, resultText, { fontSize: '56px', fill: won ? '#00ff88' : '#ff4444', fontStyle: 'bold', fontFamily: 'Cinzel' }).setOrigin(0.5);
+
+                    if (isForfeit) this.add.text(240, 370, won ? 'Opponent Fled' : 'You Surrendered', { fontSize: '24px', fill: '#aaaaaa', fontFamily: 'Rajdhani' }).setOrigin(0.5);
+
+                    try {
+                        if (!isForfeit && isP1) {
+                            const winnerId = won ? userId : (isP1 ? match.player2_id : match.player1_id);
+                            await updateEntity('DuelMatch', matchId, { status: 'finished', winner_id: winnerId, finished_at: new Date().toISOString() });
+                        }
+                        
+                        const myRecords = await fetchEntity('DuelRecord', { user_id: userId });
+                        if (myRecords[0]) {
+                            const myRecord = myRecords[0];
+                            let elo = myRecord.elo || 1200;
+                            elo = won ? elo + 25 : elo - 25;
+                            await updateEntity('DuelRecord', myRecord.id, { 
+                                elo: elo, wins: (myRecord.wins || 0) + (won ? 1 : 0), losses: (myRecord.losses || 0) + (won ? 0 : 1) 
+                            });
+                        }
+                    } catch (e) { console.error(e); }
+
+                    // Send players back to Base44 after 4 seconds
+                    setTimeout(() => { window.location.href = "https://app.base44.com/"; }, 4000);
+                }
+            }
+
+            const config = {
+                type: Phaser.AUTO, width: 480, height: 800, parent: 'game-container',
+                backgroundColor: '#0a0614', scene: [BattleScene],
+                scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH }
+            };
+            new Phaser.Game(config);
+        }
+    </script>
+</body>
+</html>
